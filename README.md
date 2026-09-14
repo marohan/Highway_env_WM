@@ -182,6 +182,42 @@ One exception matters: in ~2.3% of plans **every candidate scores as dead**, `Z`
 flat at zero and the choice falls through with no signal. That looks like a defect and
 is arguably a feature — see below.
 
+### Body swap — online identification is load-bearing
+
+Sections above isolate the ranking layer by pinning the self-model to ground truth.
+`evaluation/body_swap.py` unpins it and changes the ego's actual physical authority
+(`acceleration_range`), then compares three arms seed-paired over 360 episodes: an
+**adaptive** agent that starts from `mu = −10, sigma = 10` and actively probes an empty
+road until `sigma < 0.5`; a **pinned-nominal** agent that believes it still has its old
+brakes; and a **pinned-oracle** agent told the truth.
+
+Active calibration recovers the true braking authority in **6 steps** — identified
+2.52 / 3.52 / 5.01 / 7.01 against true 2.5 / 3.5 / 5.0 / 7.0.
+
+Pooled over the three swapped bodies (n = 90 each):
+
+| arm | collisions | rate | mean speed |
+|---|---|---|---|
+| adaptive | 18 / 90 | 0.200 | 21.07 |
+| pinned-nominal | 24 / 90 | 0.267 | 21.69 |
+| pinned-oracle | 17 / 90 | 0.189 | 21.07 |
+
+McNemar on matched (body, seed) pairs: **adaptive crashed alone 0 times,
+pinned-nominal crashed alone 6 times, exact p = 0.031**, at a cost of 0.61 m/s.
+Against the oracle the difference is 1 vs 0 discordant pairs, p = 1.000 — six seconds
+of probing is indistinguishable from being told the answer.
+
+The conservatism is graded by how wrong the body is. Speed relative to the
+pinned-nominal agent: **−1.02 m/s** at half braking authority, −0.89 at 3.5, −0.11 at
+the nominal body where there is nothing to discover, +0.07 at 7.0. Nothing in the code
+says "if the brakes are weak, drive slower"; it falls out of identifying `a_decel`,
+which grows the RSS distance, which grows the target gap, which lowers target speed.
+
+One precision: the conservatism arrives through the **mean**, not the variance. The
+ensemble spread is wider for the adaptive arm but does not track degradation (0.74 at
+|a| = 2.5, 0.93 at |a| = 7.0), so the "surprise inflates sigma → pessimism → caution"
+pathway remains unvalidated.
+
 ### S1 — the Option trap
 
 Aggregate benchmarks cannot separate the two readings because dense random traffic
@@ -257,10 +293,12 @@ collision occurs; hand-tuned constants have no such path.
 
 **Measurement.** The passing configuration rests on *zero* observed events. The 1.4×
 gap between the two readings is not separable at 95% and would need 3–4× the exposure
-to settle. Evaluation pins the self-model priors to ground truth in order to isolate the
-ranking layer, so **this repository does not yet show that online SELF identification
-improves driving** — that requires swapping the body. Surrounding vehicles yield to the
-ego, so some of the measured survival is other drivers' goodwill.
+to settle. Surrounding vehicles yield to the ego, so some of the measured survival is
+other drivers' goodwill. Sections 1–7 of `RESULTS.md` pin the self-model priors to
+ground truth to isolate the ranking layer, which also leaves the pessimism ensemble
+nearly degenerate (a 4–13% spread) — so every number there was produced with the
+robust/adaptive machinery effectively suppressed. The body-swap experiment unpins it
+(see below); the variance/pessimism pathway specifically is still unvalidated.
 
 **Structure.** Ego pose and velocity are read noiselessly from the simulator, and lane
 width, road bounds and body dimensions are hardcoded — the "512 rays only" framing is
@@ -380,9 +418,9 @@ The negative result comes with a mechanism, which is the contribution.
 1. **Re-place `log Z` as a margin signal.** Take it out of the ranking slot, wire it to
    alarms and monitoring, and measure its predictive power for incidents under the same
    protocol.
-2. **Swap the body.** Whether online identification earns its keep only shows up when
-   vehicle parameters change. Which degrades first — the tuned constants or the
-   posterior-derived signal — is the experiment the whole lineage rests on.
+2. **Push the body swap further.** Identification is now shown to earn its keep for
+   `a_decel` (below). The variance/pessimism pathway is not: make `k_factor` a live
+   knob by starting from genuinely wide posteriors and re-measure.
 3. **A domain where traps are death.** A jam is not death, but a joint limit, a fuel
    floor and a dead-end corridor are. This work specified the boundary condition; the
    inside of that boundary is still untested.
