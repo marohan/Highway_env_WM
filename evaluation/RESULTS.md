@@ -435,6 +435,102 @@ the implementation is weak, but because the objective cannot represent the kind 
 trap that matters on a highway. **The negative result now has a mechanism, not
 just a magnitude.**
 
+## 8. Body swap — does online SELF identification earn its keep?
+
+Every number in sections 1-7 was produced with the self-model priors **pinned to
+ground truth** (`mu = -5.0, var = 0.1^2`) to isolate the ranking layer. That also
+left the adaptive/robust machinery in a near-degenerate regime: measured over
+full episodes the world ensemble spanned only 4.8-5.0 m/s^2 (4%) to 4.4-5.0
+(13%), which is why `k_factor` came out a dead knob in section 1. Two headline
+claims of the project had therefore never been tested.
+
+`evaluation/body_swap.py` changes the ego's physical authority through the
+environment's `acceleration_range`, symmetrically so the zero-command point stays
+at zero. Three arms, seed-paired, 30 episodes per cell, 360 episodes total:
+
+- **adaptive** — priors start at "I don't know" (mu = -10, sigma = 10), active
+  calibration probes an empty road until sigma < 0.5, then drives.
+- **pinned_nominal** — priors pinned to the *nominal* body whatever the real one
+  is: an agent that believes it still has its old brakes.
+- **pinned_oracle** — priors pinned to the *true* body. Upper bound.
+
+**Pre-registered prediction** (written before the run): on the weak body,
+`pinned_nominal` computes RSS distances that are too short and collides
+materially more often; `adaptive` recovers most of that gap; on the nominal body
+all three coincide.
+
+| body \|a\| | arm | believed | calib steps | collisions | 95% CI | speed | ens. spread |
+|---|---|---|---|---|---|---|---|
+| 2.5 | adaptive | **2.52** | 6 | 0.233 | 0.12–0.41 | 20.52 | 0.74 |
+| 2.5 | pinned_nominal | 5.00 | — | 0.300 | 0.17–0.48 | 21.54 | 0.47 |
+| 2.5 | pinned_oracle | 2.50 | — | 0.200 | 0.10–0.37 | 20.42 | 0.53 |
+| 3.5 | adaptive | **3.52** | 6 | 0.167 | 0.07–0.34 | 20.89 | 0.78 |
+| 3.5 | pinned_nominal | 5.00 | — | 0.267 | 0.14–0.44 | 21.79 | 0.42 |
+| 3.5 | pinned_oracle | 3.50 | — | 0.167 | 0.07–0.34 | 20.92 | 0.50 |
+| 5.0 *(nominal)* | adaptive | **5.01** | 6 | 0.267 | 0.14–0.44 | 21.77 | 0.89 |
+| 5.0 *(nominal)* | pinned_nominal | 5.00 | — | 0.300 | 0.17–0.48 | 21.88 | 0.41 |
+| 5.0 *(nominal)* | pinned_oracle | 5.00 | — | 0.300 | 0.17–0.48 | 21.88 | 0.41 |
+| 7.0 | adaptive | **7.01** | 6 | 0.200 | 0.10–0.37 | 21.80 | 0.93 |
+| 7.0 | pinned_nominal | 5.00 | — | 0.233 | 0.12–0.41 | 21.74 | 0.32 |
+| 7.0 | pinned_oracle | 7.00 | — | 0.200 | 0.10–0.37 | 21.87 | 0.33 |
+
+At the nominal body `pinned_nominal` and `pinned_oracle` are identical by
+construction (0.300 / 21.88 / 0.41), which confirms the harness is wired
+correctly.
+
+### Seed-paired comparison, pooled over the three swapped bodies (n = 90)
+
+| arm | collisions | rate | speed |
+|---|---|---|---|
+| adaptive | 18 / 90 | 0.200 | 21.07 |
+| pinned_nominal | 24 / 90 | 0.267 | 21.69 |
+| pinned_oracle | 17 / 90 | 0.189 | 21.07 |
+
+McNemar on matched (body, seed) pairs:
+
+| contrast | A crashed alone | B crashed alone | exact p | speed delta |
+|---|---|---|---|---|
+| **adaptive vs pinned_nominal** | **0** | **6** | **0.031** | −0.61 m/s |
+| adaptive vs pinned_oracle | 1 | 0 | 1.000 | +0.00 m/s |
+
+**The prediction holds, and the discordance is one-sided.** Across 90 matched
+pairs there is **not a single case** where the adaptive agent crashed and the
+mis-informed one did not. Six seconds of active probing costs 0.61 m/s (2.8%)
+and is statistically **indistinguishable from knowing the true body**.
+
+### The conservatism is graded by how wrong the body is
+
+| body \|a\| | speed, adaptive − pinned_nominal | collisions, adaptive − pinned_nominal |
+|---|---|---|
+| 2.5 (half brakes) | **−1.02 m/s** | −0.067 |
+| 3.5 | −0.89 m/s | −0.100 |
+| 5.0 (nominal, nothing to learn) | −0.11 m/s | −0.033 |
+| 7.0 (stronger brakes) | +0.07 m/s | −0.033 |
+
+The agent slows in proportion to how degraded its body actually is, and does not
+slow when there is nothing to discover. **Nothing in the code says "if the brakes
+are weak, drive slower."** It falls out of identify `a_decel` → RSS `d_safe`
+grows → target gap grows → target speed drops.
+
+### One precision the result forces
+
+The conservatism arrives through the **mean**, not the variance channel. The
+ensemble spread is wider for the adaptive arm (0.74–0.93 vs 0.32–0.53) but does
+**not** track body degradation — it is 0.74 at |a| = 2.5 and 0.93 at |a| = 7.0.
+So "surprise inflates sigma, which makes the maximin pessimistic, which makes the
+agent cautious" is still **not demonstrated**. What is demonstrated is "identify
+mu correctly → RSS is correct → speed is appropriate." The variance/pessimism
+pathway (`pessimism_mean_weight`, `k_factor`) remains unvalidated, consistent
+with `k_factor` being a dead knob in section 1.
+
+### What this settles
+
+The SELF element transfers, and it is **load-bearing rather than decorative** —
+the first result in this repository where the adaptive machinery is shown to buy
+something. It is also the cleanest positive finding here: a strict one-sided
+paired improvement, a monotone dose–response in the speed reduction, and parity
+with an oracle after six seconds of probing.
+
 ## Reproduce
 
 ```bash
@@ -455,6 +551,9 @@ python3 test_viability_bias.py
 
 # S1 option trap (~7 min)
 .venv_mac/bin/python evaluation/scenario_s1.py
+
+# body swap, 10 workers (~23 min)
+.venv_mac/bin/python evaluation/body_swap.py --workers 10 --episodes 30
 
 # rear-RSS ablation
 .venv_mac/bin/python evaluation/evaluate_vs_idm.py --episodes 30 --rear-rss 0 \
